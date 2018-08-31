@@ -53,13 +53,11 @@ def _is_variable_op(op):
 @tf_export("graph_util.must_run_on_cpu")
 def must_run_on_cpu(node, pin_variables_on_cpu=False):
   """Returns True if the given node_def must run on CPU, otherwise False.
-
   Args:
     node: The node to be assigned to a device. Could be either an ops.Operation
       or NodeDef.
     pin_variables_on_cpu: If True, this function will return False if node_def
       represents a variable-related op.
-
   Returns:
     True if the given node must run on CPU, otherwise False.
   """
@@ -149,16 +147,38 @@ def _bfs_for_reachable_nodes(target_nodes, name_to_input_name):
   return nodes_to_keep
 
 
-@tf_export("graph_util.extract_sub_graph")
-def extract_sub_graph(graph_def, dest_nodes):
-  """Extract the subgraph that can reach any of the nodes in 'dest_nodes'.
+def _add_dataset_api_node(nodes_to_keep, name_to_node, name_to_input_name, graph_def):
+  iterator_names=set()
+  for name in nodes_to_keep:
+    if name_to_node[name].op=="Iterator":
+      iterator_names.add(name)
 
+  makeIterator_names=set()
+  iteratorToStringHandle_names=set()
+  for node in graph_def.node:
+    if node.op=="MakeIterator":
+      for input_node in node.input:
+        if _node_name(input_node) in iterator_names:
+          makeIterator_names.add(_node_name(node.name))
+          break
+    elif node.op=="IteratorToStringHandle":
+      for input_node in node.input:
+        if _node_name(input_node) in iterator_names:
+          iteratorToStringHandle_names.add(_node_name(node.name))
+          break
+  nodes_to_keep= nodes_to_keep.union(iteratorToStringHandle_names)        
+  nodes_to_keep.update(_bfs_for_reachable_nodes(list(makeIterator_names),name_to_input_name))            
+  return nodes_to_keep
+
+
+@tf_export("graph_util.extract_sub_graph")
+def extract_sub_graph(graph_def, dest_nodes,*,dataset_flag=False):
+  """Extract the subgraph that can reach any of the nodes in 'dest_nodes'.
   Args:
     graph_def: A graph_pb2.GraphDef proto.
     dest_nodes: A list of strings specifying the destination node names.
   Returns:
     The GraphDef of the sub-graph.
-
   Raises:
     TypeError: If 'graph_def' is not a graph_pb2.GraphDef proto.
   """
@@ -174,6 +194,9 @@ def extract_sub_graph(graph_def, dest_nodes):
   _assert_nodes_are_present(name_to_node, dest_nodes)
 
   nodes_to_keep = _bfs_for_reachable_nodes(dest_nodes, name_to_input_name)
+
+  if dataset_flag:
+    nodes_to_keep = _add_dataset_api_node(nodes_to_keep, name_to_node, name_to_input_name, graph_def)
 
   nodes_to_keep_list = sorted(
       list(nodes_to_keep), key=lambda n: name_to_seq_num[n])
@@ -207,14 +230,14 @@ def convert_variables_to_constants(sess,
                                    input_graph_def,
                                    output_node_names,
                                    variable_names_whitelist=None,
-                                   variable_names_blacklist=None):
+                                   variable_names_blacklist=None,
+                                   *,
+                                   dataset_flag=False):
   """Replaces all the variables in a graph with constants of the same values.
-
   If you have a trained graph containing Variable ops, it can be convenient to
   convert them all to Const ops holding the same values. This makes it possible
   to describe the network fully with a single GraphDef file, and allows the
   removal of a lot of ops related to loading and saving the variables.
-
   Args:
     sess: Active TensorFlow session containing the variables.
     input_graph_def: GraphDef object holding the network.
@@ -223,13 +246,12 @@ def convert_variables_to_constants(sess,
                               all variables are converted).
     variable_names_blacklist: The set of variable names to omit converting
                               to constants.
-
   Returns:
     GraphDef containing a simplified version of the original.
   """
   # This graph only includes the nodes needed to evaluate the output nodes, and
   # removes unneeded nodes like those involved in saving and assignment.
-  inference_graph = extract_sub_graph(input_graph_def, output_node_names)
+  inference_graph = extract_sub_graph(input_graph_def, output_node_names,dataset_flag=dataset_flag)
 
   found_variables = {}
   variable_names = []
@@ -289,23 +311,21 @@ def convert_variables_to_constants(sess,
   return output_graph_def
 
 
+
 @tf_export("graph_util.remove_training_nodes")
 def remove_training_nodes(input_graph, protected_nodes=None):
   """Prunes out nodes that aren't needed for inference.
-
   There are nodes like Identity and CheckNumerics that are only useful
   during training, and can be removed in graphs that will be used for
   nothing but inference. Here we identify and remove them, returning an
   equivalent graph. To be specific, CheckNumerics nodes are always removed, and
   Identity nodes that aren't involved in control edges are spliced out so that
   their input and outputs are directly connected.
-
   Args:
     input_graph: Model to analyze and prune.
     protected_nodes: An optional list of names of nodes to be kept
       unconditionally. This is for example useful to preserve Identity output
       nodes.
-
   Returns:
     A list of nodes with the unnecessary ones removed.
   """
